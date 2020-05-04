@@ -82,6 +82,7 @@ def outputs(dates, disp_x, disp_y, disp_v, params, single_station):
 	call(['mkdir','-p',params.output_dir],shell=False);
 	output_dir = params.output_dir+"/"+params.datasource+"_"+params.gracetype+"_"+str(params.scaling)+"/";  # Example: "MIBB/JPL_TELLUS_0/"
 	call(['mkdir','-p',output_dir],shell=False);
+	call(['cp','config.txt',output_dir],shell=False);  # in case you used config.txt as your config file. 
 	output_file = output_dir+single_station.name[0]+"_PREM_model_ts.txt";
 	ofile=open(output_file,'w');
 	for i in range(len(dates)):

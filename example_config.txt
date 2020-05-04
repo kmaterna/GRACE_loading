@@ -1,0 +1,25 @@
+####################
+[io-config]
+network = MIBB
+gps_infile = MIBB_test.txt
+output_dir = Outputs/MIBB
+GRACE_data_dir = /Users/kmaterna/Documents/B_Research/Myanmar/GRACEDATA/DATA/
+mascon_datafile = Mascons/GRCTellus.JPL.200204_202002.GLO.RL06M.MSCNv02CRI.nc
+mascon_scalefile = Mascons/CLM4.SCALE_FACTOR.JPL.MSCNv02CRI.nc
+tellus_jpl_datafile = GRCTellus.JPL.200204_201701.LND.RL05_1.DSTvSCS1411.nc
+tellus_csr_datafile = GRCTellus.CSR.200204_201701.LND.RL05.DSTvSCS1409.nc
+tellus_gfz_datafile = GRCTellus.GFZ.200204_201701.LND.RL05.DSTvSCS1409.nc
+tellus_scalefile = CLM4.SCALE_FACTOR.DS.G300KM.RL05.DSTvSCS1409.nc
+grace_dates_file = GRACE_GRACE-FO_Months_RL06.csv
+
+#########
+[calc-config]
+# greensfunc options: a few things (not all working)
+# max_distance : in degrees
+# scaling : boolean
+#########
+greensfunc = GRACELoading_2017/Greens_Functions/Wahr_6.206_whole_earth
+gracetype = Mascon
+datasource = JPL
+max_distance = 20
+scaling = 0
