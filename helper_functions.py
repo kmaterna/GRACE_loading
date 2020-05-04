@@ -8,108 +8,81 @@
 import datetime as dt 
 from scipy.io import netcdf
 import collections
-import os 
+import os, sys
 from subprocess import call
 import glob
 import numpy as np 
 import matplotlib
 import matplotlib.pyplot as plt 
 
-Station_Array=collections.namedtuple('Station_Array',['station_names',
-	'station_lon', 'station_lat','start_time','end_time']);
-GRACE_Array=collections.namedtuple('GRACE_Array',['grace_start_times',
-	'layerstrings','x_range','y_range','we','scalefactor']);
-
-
-
-def define_io_options(network, dataset, use_scale):
-	""" This simple function sets up the paths for outputs depending on what options we want (JPL vs. GFZ, scaled vs. unscaled).
-		It tells the program where to find the data and where to send the results. 
-	"""
-	output_stem="OUTPUT/"+network;
-	grace_data_stem="../GRACEDATA/DATA/"  # where the GRACE netcdf file live. 
-	print "Output stem is "+output_stem+"/";
-
-	if not os.path.exists(output_stem):
-		call(['mkdir',output_stem],shell=False);
-	if dataset == "JPL":
-		netfile = grace_data_stem+"GRCTellus.JPL.200204_201701.LND.RL05_1.DSTvSCS1411.nc";
-	if dataset == "GFZ":
-		netfile = grace_data_stem+"GRCTellus.GFZ.200204_201701.LND.RL05.DSTvSCS1409.nc";
-	if dataset == "CSR":
-		netfile = grace_data_stem+"GRCTellus.CSR.200204_201701.LND.RL05.DSTvSCS1409.nc";
-	if use_scale == 1:
-		file_prefix="scaled";
-	else:
-		file_prefix="unscaled";	
-	output_dir = output_stem+"/"+dataset+"_"+file_prefix;  # Example: "MIBB_stations/JPL_scaled/"
-	if not os.path.exists(output_dir):
-		call(['mkdir',output_dir],shell=False);
-	scalefile="../GRACEDATA/DATA/CLM4.SCALE_FACTOR.DS.G300KM.RL05.DSTvSCS1409.nc";
-
-	return [netfile, scalefile, output_dir+"/", file_prefix+"_"];
-
+Station_Array=collections.namedtuple('Station_Array',['name','lon', 'lat','start_time','end_time']);
+Load_Array = collections.namedtuple('Load_Array',['lon','lat','east_width','north_width','pressure']);  # for rectangular loads
+GRACE_Array=collections.namedtuple('GRACE_Array',['grace_central_times',
+	'layerstrings','x_range','y_range','we','east_width','north_width','scalefactor']);
+Greensfunc = collections.namedtuple('Greensfunc',['deg','km','hload','vload']);
 
 
 def read_GRACE_netfile(netfile, scalefile):
-	"""
-	Meant for reading a netcdf file that has many time-slices. 
-	"""
-
+	print("Reading GRACE file %s " % netfile);
 	f = netcdf.netcdf_file(netfile,'r');
-	layernames = f.input_filename;
-	layernames = layernames.split('\r');
-	layerstrings = titlestrings(layernames);  # Format: 01-Apr-2002_30-Jun-2002
-	grace_start_times = beginepochs(layernames);    # Format: 2014.254000
-
-	# Get the x_range and y_range (both just two numbers, like [39.38 39.86] degrees N)
-	x_range = f.variables['lon'];
+	x_range = f.variables['lon'];  # an array from 0-360 in half-degree increments
 	x_range = x_range[:].copy();
-	y_range = f.variables['lat'];
-	y_range = y_range[:].copy();
-	z_range = f.variables['time'];
+	y_range = f.variables['lat'];  # an array from -89 to 89 in half-degree increments
+	y_range = y_range[:].copy();	
+	z_range=f.variables['time'];  # an array of 182 numbers, units = days since 2002-01-01
 	z_range = z_range[:].copy();
+	official_start_date = dt.datetime.strptime("2002-01-01","%Y-%m-%d");
+	zdates = [];
+	layerstrings=[];
+	for i in range(len(z_range)):
+		zdates.append(official_start_date+dt.timedelta(days=int(z_range[i])));  
+		layerstrings.append(dt.datetime.strftime(zdates[-1],"%Y-%m-%d"));
+		# the actual middle date of each interval, matching with the excel file for grace months
 
-	# Get the grids and labels for gravity / water thickness. 
 	we = f.variables['lwe_thickness'];
-	we = we[:].copy();
+	we = we[:].copy();  # shape 182 x 360 x 720.  360 for lat, 720 for lon, 182 for time. 
+	north_interval = 180/np.shape(we)[1];  
+	east_interval = 360/np.shape(we)[2];
+	east_width = east_interval/2 * np.ones(np.shape(we[0,:,:]));   # in degrees, half-width of the box
+	north_width = north_interval/2 * np.ones(np.shape(we[0,:,:]));  # in degrees, half-width of the box
 
 	# Get the GRACE scale factor corrections. 
-	sf = netcdf.netcdf_file(scalefile,'r');
-	scalefactor=sf.variables['SCALE_FACTOR'];   # size = 360x180; time-independent. 
-	scalefactor=scalefactor[:].copy();
+	if "Mascons" in netfile:
+		scalefactor=[];
+	else:
+		sf = netcdf.netcdf_file(scalefile,'r');
+		scalefactor=sf.variables['SCALE_FACTOR'];   # size = ; time-independent. 
+		scalefactor=scalefactor[:].copy();
 
-	grace_data_structure=GRACE_Array(grace_start_times=grace_start_times, layerstrings=layerstrings, 
-		x_range=x_range, y_range=y_range, we=we, scalefactor=scalefactor);
-
-	return grace_data_structure; 
-
-
+	grace_data_structure=GRACE_Array(grace_central_times=zdates, layerstrings=layerstrings, 
+		x_range=x_range, y_range=y_range, we=we, east_width=east_width, north_width=north_width, scalefactor=scalefactor);
+	return grace_data_structure;
 
 def read_station_file(station_list):
-
+	print("Reading station file %s " % station_list);
 	ifile=open(station_list,'r');
 	station_names=[]; station_lon=[]; station_lat=[]; start_time=[]; end_time=[];
-	grace_begin=2002.000;
-	grace_end=2017.1;
-	grace_default_start=2012.000;
+	grace_begin=dt.datetime.strptime("2002-01-01","%Y-%m-%d");
+	grace_end=dt.datetime.strptime("2017-06-01","%Y-%m-%d");
+	grace_default_start=dt.datetime.strptime("2012-01-01","%Y-%m-%d");
 	for line in ifile:
 		temp=line.split();
 		station_names.append(temp[0]);
-		station_lon.append(temp[1]);
-		station_lat.append(temp[2]);
+		station_lon.append(float(temp[1]));
+		station_lat.append(float(temp[2]));
 	
 		# Decide on the time range for the computation at each GPS station. 
-		# If time constraints are given: 
 		if len(temp)>4:
-			gps_start_time=float(temp[3]);
-			gps_end_time  =float(temp[4]);
+			gps_start_time = dt.datetime.strptime(temp[3],"%Y-%m-%d");
+			gps_end_time  = dt.datetime.strptime(temp[4],"%Y-%m-%d");
+			gps_start_time = gps_start_time-dt.timedelta(days=400);  # giving some grace period
+			gps_end_time   = gps_end_time+dt.timedelta(days=400);
+
+			# We can't compute GRACE before 2002 or after 2017, so ignore all data before that. 
 			if gps_start_time<grace_begin:
-				gps_start_time=grace_begin;
-				# We can't compute GRACE before 2002.000, so ignore all data before that. 
-			gps_start_time=max(gps_start_time-1.5, grace_begin);
-			gps_end_time  =min(gps_end_time+1.5,grace_end);
-			# Here we adopt the slightly padded range of the GPS data for our GRACE calculation
+				gps_start_time=grace_begin;				
+			if gps_end_time>grace_end:
+				gps_end_time=grace_end;
 
 		else: 		# If time constraints are not given, replace them with default time window. 
 			gps_start_time=grace_default_start;
@@ -117,124 +90,48 @@ def read_station_file(station_list):
 
 		start_time.append(gps_start_time);
 		end_time.append(gps_end_time);
-		my_station_array=Station_Array(station_names=station_names,station_lon=station_lon, 
-			station_lat=station_lat,start_time=start_time,end_time=end_time);
+		my_station_array=Station_Array(name=station_names,lon=station_lon, 
+			lat=station_lat,start_time=start_time,end_time=end_time);
 	return my_station_array; 
 
+def read_spherical_greensfunc(gf_file):
+	[deg, km, vload, hload] = np.loadtxt(gf_file,unpack=True); 
+	GF = Greensfunc(deg=deg, km=km, hload=hload, vload=vload);
+	return GF;
 
-def write_load_file(grace_data_structure, n, use_scale,loadfile):
+def package_loads_from_GRACE(grace_data_structure, n, use_scale):
 	"""
-	This reads the n'th slice from the netfile [X x Y x n], multiplies by the scale file, and writes the load into a load file. 
+	This reads the n'th slice from the netfile [X x Y x n], multiplies by the scale file, and packages the load into a basic object.
 	If use_scale is set, then we multiply the GRACE timeslice by the scale factor grid. 
-	This is a global load file. 
+	This is a global load. 
+	The widths are in degrees.
 	"""	
-	# Multiply by scale factor (optional).  Write out to file.  Format = lon, lat, xspacing, yspacing, load
-	outfile=open(loadfile,'w');
-	
 	snapshot=grace_data_structure.we[n,:,:];   # Get a snapshot
 	s1=np.shape(snapshot);   # fill in NaN's as necessary over the water mask. 
 	mult_scalefactor=grace_data_structure.scalefactor;
 	if use_scale==0:  # If no scaling grid applied: 
 		mult_scalefactor=np.ones(s1);  # if we are not using scale factor, we just multiply everything by 1. 
 
+	load_lon = []; load_lat = []; load_width=[]; load_height=[]; load_pressure=[];
 	for i in range(s1[0]):
 		for j in range(s1[1]):
-			if snapshot[i,j]<5000:        # Write the numeric values for pixels not over water. 
+			if snapshot[i,j]<5000:     # DOES THIS STILL WORK FOR MASCONS? 	
 				pressure = snapshot[i,j]*mult_scalefactor[i,j]*(1.0/100)*9.81*1000.0;  
 				# rho*g*h (h converted cm --> meters)   
-				outfile.write("%f %f 0.5 0.5 %f\n" %(grace_data_structure.x_range[j], grace_data_structure.y_range[i], pressure));  
-				# write an ascii file for GMT.
-				# The 0.5 and 0.5 are for the GRACE 1-degree-by-1-degree grids. 
-	outfile.close();
+				load_lon.append(grace_data_structure.x_range[j]);
+				load_lat.append(grace_data_structure.y_range[i]);
+				load_width.append(grace_data_structure.east_width[i,j]);
+				load_height.append(grace_data_structure.north_width[i,j]);
+				load_pressure.append(pressure);
+	load_obj = Load_Array(lon=load_lon, lat=load_lat, east_width=load_width, north_width=load_height, pressure=load_pressure);
+	return load_obj;
+
+def write_global_load_file(outfile, Load_Array):
+	# This function might be useful eventually, but I don't have reason to use it right now. 
 	return;
-
-
-
-def write_station_file(stationfile, station_lon, station_lat):
-	ifile=open(stationfile,'w');
-	ifile.write("%s %s 0\n" %(station_lon, station_lat));
-	ifile.close();
-	return;
-
-def write_time_stamp(outfile,timestamp):
-	ifile=open(outfile,'a');
-	ifile.write(str(timestamp)+' ');
-	ifile.close();
-	print timestamp
-	return;
-
-def get_decyear(yyyyddd):
-	myday=dt.datetime.strptime(yyyyddd,"%Y%j");
-	year=float(yyyyddd[0:4]);
-	jday=float(myday.strftime("%j"));
-	decyear=year+jday/365.24;
-	return decyear;
-
-def get_ddmmyyyy(yyyyddd):
-	myday=dt.datetime.strptime(yyyyddd,"%Y%j");
-	year=yyyyddd[0:4];
-	month=myday.strftime("%b");
-	dd=myday.strftime("%d");
-	formatstring=dd+"-"+month+"-"+year;
-	return formatstring;
-
-def get_datetimes(tsfile):
-	ifile=open(tsfile,'r');
-	dateobjects=[];
-	for line in ifile:
-		temp=line.split();
-		raw_string=temp[0];   # This is in the format 01-Jan-2012_31-Jan-2012
-		datestring=raw_string[0:11];
-		myobject=dt.datetime.strptime(datestring,'%d-%b-%Y');
-		dateobjects.append(myobject);
-	return dateobjects;
-
-def titlestrings(layernames):
-	"""
-	Take a set of names like './GSM/GSM-2_2014121-2014151_0031_JPLEM_0001_0005\n'
-	and convert them into '01-Apr-2014_30-Jun-2014'
-	"""
-	layerstrings=[];
-	for item in layernames:
-		yyyyddd1=item[12:19];  # start date
-		yyyyddd2=item[20:27];  # end date
-		converted_name1=get_ddmmyyyy(yyyyddd1);
-		converted_name2=get_ddmmyyyy(yyyyddd2);
-		layerstrings.append(converted_name1+'_'+converted_name2);
-	return layerstrings;
-
-def beginepochs(layernames):
-	"""
-	Take a set of names like './GSM/GSM-2_2014121-2014151_0031_JPLEM_0001_0005\n'
-	and convert them into '2014.2500'
-	"""
-	start_times=[];
-	for item in layernames:
-		yyyyddd1=item[12:19];  # start date
-		start_times.append(get_decyear(yyyyddd1));
-	return start_times;
 
 def delete_files_matching(match_string):
 	clear_list=glob.glob(match_string);
 	for item in clear_list:
 		call(['rm',item],shell=False); 	
 	return;
-
-def make_single_plot(plotroot, station_name):
-	tsfile=plotroot+'_model_ts.txt';
-	[x, y, z, u, v, w] = np.loadtxt(tsfile,usecols=range(1,7),unpack=True);
-	datetimes=get_datetimes(tsfile);
-	t = matplotlib.dates.date2num(datetimes);
-	plt.figure();
-	plt.plot_date(t,w,'b--');
-	plt.plot_date(t,u,'r');
-	plt.plot_date(t,v,'g');
-	plt.plot_date(t,w,'b.',markersize=15);
-	plt.ylabel('Displacement (mm)');
-	plt.title(station_name+' Model Time Series');
-	plt.legend(['Vertical','East','North']);
-	plt.savefig(plotroot+'.jpg');
-	plt.close();
-	return;
-
-

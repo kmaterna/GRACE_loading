@@ -13,100 +13,97 @@ import numpy as np
 from subprocess import call 
 import glob
 import datetime as dt 
-import os
+import os, sys
 import matplotlib.pyplot as plt 
-import prem_greens_functions
+import prem_functions
 import helper_functions
 
+# Major interface: 
+# output = mass_loading_python_implementation(GRACE_array, stations_array);
 
-def prem_earth_grace_timeseries(network, dataset, use_scale):
-	[netfile, scalefile, station_file, output_dir, file_prefix, disk_radius, PREM_green, threshhold_distance] = configure(network, dataset, use_scale);
-	[my_station_array, grace_data_structure]   = get_inputs(station_file, netfile, scalefile);
-	compute(output_dir, file_prefix, use_scale, disk_radius, PREM_green, threshhold_distance, my_station_array, grace_data_structure);
-	outputs(output_dir, file_prefix, my_station_array);
+def prem_earth_grace_timeseries(params):
+	netfile, scalefile = configure_filepaths(params);
+	station_obj     = helper_functions.read_station_file(params.input_file); # named tuple
+	grace_data_structure = helper_functions.read_GRACE_netfile(netfile, scalefile);  # named tuple
+	
+	computer = pyimpl_factory(params);
+	for i in range(len(station_obj.name)):  # once for each station
+		single_station=helper_functions.Station_Array(name=[station_obj.name[i]],lon=[station_obj.lon[i]],lat=[station_obj.lat[i]],start_time=[station_obj.start_time[i]],end_time=[station_obj.end_time[i]]);
+		dates, disp_x, disp_y, disp_v = computer(grace_data_structure, single_station);
+		outputs(dates, disp_x, disp_y, disp_v, params, single_station);
 	return;
 
 
+def pyimpl_factory(params):
+	# The implementation of our calculation in python. 
+	# This can be different for the half-space and C case. 
+	GF = helper_functions.read_spherical_greensfunc(params.greensfunc);  
+	disk_radius=6.206;
+
+	def mass_loading_TS_python_implementation(GRACE_array, single_station):
+		dates_used=[]; disp_x=[]; disp_y=[]; disp_v=[];
+		for n in range(len(GRACE_array.grace_central_times)):  # for each snapshot: 
+			if GRACE_array.grace_central_times[n]<single_station.start_time[0] or GRACE_array.grace_central_times[n]>single_station.end_time[0]:
+				continue;
+			else:
+				print("Calculating %s for station %s" % (GRACE_array.grace_central_times[n],single_station.name[0]) );
+				GRACE_single_loads = helper_functions.package_loads_from_GRACE(GRACE_array, n, params.scaling);  # more basic structure of the loads
+				x, y, z = prem_functions.compute_prem_load(single_station, GRACE_single_loads, disk_radius, GF, params.max_distance); 
+				disp_x.append(x[0]); 
+				disp_y.append(y[0]); 
+				disp_v.append(z[0]);  # single station must be unpacked. 
+				dates_used.append(GRACE_array.grace_central_times[n]);
+		return dates_used, disp_x, disp_y, disp_v;
+
+	return mass_loading_TS_python_implementation;
 
 # ---------------------- CONFIGURE ------------------------ # 
-def configure(network, dataset, use_scale):
-
-	# GET STARTED WITH SET-UP AND CLEAN-UP
-	input_file="INPUT/"+network+".txt"
-	[netfile, scalefile, output_dir, file_prefix] = helper_functions.define_io_options(network, dataset, use_scale);
-	helper_functions.delete_files_matching(output_dir+file_prefix+'*_PREM_model_ts.txt');  # get started with a clean directory. 
-
-	# Other parameters that don't often change. 
-	threshhold_distance = 2000*1000;  # in m. Further than 2000km away, we assume the elastic loads don't matter. 	
-	disk_radius = 6.206;  # options are 0.564km (1km^2) or 31km (3019km^2), because that's what we have green's functions for. 
-	PREM_green ="Wahr_6.206"  # Make sure these match!!!
-
-	return [ netfile, scalefile, input_file, output_dir, file_prefix, disk_radius, PREM_green, threshhold_distance];
-
-
-
-# ---------------------- INPUTS ------------------------ # 
-def get_inputs(station_list, netfile, scalefile):
-	# Bring us arrays of lat, lon, and time ranges that we need to compute loading at. 
-	# Bring us the GRACE netfile array
-	print station_list
-	my_station_array     = helper_functions.read_station_file(station_list); # Structure has: name, lon, lat, starttime, endtime
-	grace_data_structure = helper_functions.read_GRACE_netfile(netfile, scalefile);  # Structure has: grace_start_times,layerstrings,x_range,y_range,we,scalefactor
-	return [my_station_array, grace_data_structure];
-
-
-
-# ---------------------- COMPUTATION ------------------------ # 
-def compute(output_dir, file_prefix, use_scale, disk_radius, PREM_green, threshhold_distance, my_station_array, grace_data_structure):
-	# THE COMPUTATION LOOP: ONCE FOR EACH STATION
- 	for i in range(len(my_station_array.station_names)):
-		print "Running "+file_prefix+"computation for station "+my_station_array.station_names[i];
-		output_file = output_dir+file_prefix+my_station_array.station_names[i]+"_PREM_model_ts.txt";
-		compute_load_ts(my_station_array.start_time[i], my_station_array.end_time[i], my_station_array.station_lon[i], my_station_array.station_lat[i], 
-			"temp_my_station.txt", "temp_GRACE_load.txt", output_file, threshhold_distance, use_scale, grace_data_structure, disk_radius, PREM_green);
-	return;
-
-
-def compute_load_ts(start_date, end_date, station_lon, station_lat, stationfile, loadfile, output_file, threshhold_distance, use_scale, 
-	grace_data_structure, disk_radius, PREM_green):
-	"""
-	# For a given GPS station: 
-	# For each timestamp after starting time: 
-	# Write station_file
-	# Write load_file
-	# Compute load (mode 1 for append)
-	# timestamp   --> output
-	# Deformation --> output """
-
-	for n in range(len(grace_data_structure.grace_start_times)):  # for each snapshot: 
-		if grace_data_structure.grace_start_times[n]<start_date or grace_data_structure.grace_start_times[n]>end_date:
-			continue;
+def configure_filepaths(params):
+	# Sending the right datafile into the computation. 
+	if params.gracetype=="Mascon":
+		netfile = params.mascon_datafile;
+		scalefile = params.mascon_scalefile;
+	elif params.gracetype=="TELLUS":
+		if params.datasource=="JPL":
+			netfile = params.tellus_jpl_datafile;
+		elif params.datasource=="GFZ":
+			netfile = params.tellus_gfz_datafile;
+		elif params.datasource=="CSR":
+			netfile = params.tellus_csr_datafile;
 		else:
-			disk_loadfile="disk_loadfile.txt"
-			helper_functions.write_load_file(grace_data_structure, n, use_scale, loadfile);  
-			helper_functions.write_station_file(stationfile, station_lon, station_lat);  # assumes mode 1, just a single station. 
-			helper_functions.write_time_stamp(output_file,grace_data_structure.layerstrings[n]);
-			
-			prem_functions.compute_prem_load(stationfile, loadfile, disk_loadfile, disk_radius, PREM_green, output_file, threshhold_distance, 1);
-			# mode 1 means time series mode for a single station.
-	return;
-
+			print("ERROR! Your TELLUS datasource is not valid [JPL, CSR, GFZ]. Please try again");
+			sys.exit(0);
+		scalefile=params.tellus_scalefile;
+	return netfile, scalefile;
 
 
 # ---------------------- OUTPUTS ------------------------ # 
-def outputs(output_dir, file_prefix, my_station_array):
-
-	# making plots
-	for item in my_station_array.station_names:	
-		plotroot=output_dir+file_prefix+item+"_PREM";  # where you can find/name the data
-		helper_functions.make_single_plot(plotroot, item); 
-
-	# cleaning up
-	helper_functions.delete_files_matching("temp*.txt");
-	helper_functions.delete_files_matching("*.pyc");
-	helper_functions.delete_files_matching("disk_loadfile.txt");
+def outputs(dates, disp_x, disp_y, disp_v, params, single_station):
+	call(['mkdir','-p',params.output_dir],shell=False);
+	output_dir = params.output_dir+"/"+params.datasource+"_"+params.gracetype+"_"+str(params.scaling)+"/";  # Example: "MIBB/JPL_TELLUS_0/"
+	call(['mkdir','-p',output_dir],shell=False);
+	output_file = output_dir+single_station.name[0]+"_PREM_model_ts.txt";
+	ofile=open(output_file,'w');
+	for i in range(len(dates)):
+		ofile.write(dt.datetime.strftime(dates[i],"%Y-%m-%d"));
+		ofile.write(" %f %f %.5f %.5f %.5f\n" % (single_station.lon[0], single_station.lat[0], disp_x[i], disp_y[i], disp_v[i]) );
+	ofile.close();
+	# # making plots
+	plt.figure()
+	plt.plot_date(dates,disp_v,'b--');
+	plt.plot_date(dates,disp_x,'r');
+	plt.plot_date(dates,disp_y,'g');
+	plt.plot_date(dates,disp_v,'b.',markersize=15);
+	plt.ylabel('Displacement (mm)');
+	plt.legend(['Vertical','East','North']);	
+	plt.savefig(output_dir+single_station.name[0]+"_PREM_grace.png");
 	return; 
 
-
+def temp_plot(mydate):
+	[lon, lat, load] = np.loadtxt("temp_global_GRACE_load.txt",unpack=True,usecols=(0,1,4));
+	plt.figure(dpi=300);
+	plt.scatter(lon, lat, c=load, s=0.5, vmin=-3000, vmax=3000, cmap="jet");
+	plt.colorbar();
+	plt.savefig(dt.datetime.strftime(mydate,"%Y%m%d")+"_loads.png");
 
 
