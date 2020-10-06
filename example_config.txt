@@ -14,12 +14,12 @@ grace_dates_file = GRACE_GRACE-FO_Months_RL06.csv
 
 #########
 [calc-config]
-# greensfunc options: a few things (not all working)
+# greensfunc options: a few options
 # max_distance : in degrees
 # scaling : boolean
 #########
 greensfunc = GRACELoading_2017/Greens_Functions/Wahr_6.206_whole_earth
 gracetype = Mascon
 datasource = JPL
-max_distance = 20
+max_distance = 180
 scaling = 0
